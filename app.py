@@ -1,14 +1,3 @@
-"""
-Cost of Equity & WACC Comparator — USD vs. a selected foreign currency
-======================================================================
-
-Streamlit app (Python 3.12) that fetches market data from public sources,
-lets the user override any input, and compares the cost of equity, cost of
-debt and WACC of a project in USD and in the currency of a selected country.
-
-Run with:  streamlit run app.py
-"""
-
 from __future__ import annotations
 
 import io
