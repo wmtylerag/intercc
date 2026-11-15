@@ -500,16 +500,6 @@ def main() -> None:
     erp = sb.slider("Equity risk premium (%)", 0.0, 15.0, DEFAULT_ERP, 0.1) / 100
     d = sb.slider("Target debt share D/(D+E) (%)", 0.0, 90.0, DEFAULT_DEBT, 1.0) / 100
 
-    # Project tax-rate switch
-    tax_choice = sb.radio(
-        "Project corporate tax rate",
-        ["United States", f"{country} (selected country)"] if country != DEFAULT_COUNTRY
-        else ["United States"],
-        horizontal=False,
-        help="The same tax rate is applied to both the USD and the foreign-currency calculation.",
-    )
-    use_fx_tax = tax_choice != "United States"
-
     # ---------------- Fetched values ----------------
     def lookup_tax(iso: str | None) -> float | None:
         if iso and not tax_df.empty:
@@ -581,9 +571,38 @@ def main() -> None:
             spread_fx = auto_spread_fx
             st.caption(f"{country} BBB spread: **{auto_spread_fx:.2f}%** (automatic)")
 
-    t = (t_fx if use_fx_tax else t_us) / 100
-    if use_fx_tax and fetched_tax_fx is None and not ov_tfx:
-        st.error(f"No OECD tax rate found for {country}. Enable the override and enter a rate.")
+    # ---------------- Project tax-rate switch (one rate for both currencies) ----------------
+    is_us = country == DEFAULT_COUNTRY
+    fx_tax_missing = (not is_us) and fetched_tax_fx is None and (not ov_tfx or t_fx == 0)
+    with st.container(border=True):
+        st.markdown("**Project corporate tax rate** — one rate is applied to *both* the USD and the "
+                    "foreign-currency calculation")
+        tc1, tc2 = st.columns([3, 2])
+        tax_choice = tc1.radio(
+            "Use the tax rate of:",
+            ["US", "FX"],
+            format_func=lambda k: (
+                f"🇺🇸 United States — {t_us:.2f}%" if k == "US"
+                else (f"{country} — {t_fx:.2f}%" if not is_us and not fx_tax_missing
+                      else f"{'Selected country' if is_us else country} — "
+                           f"{'select a foreign country' if is_us else 'rate not available'}")
+            ),
+            key="project_tax_choice",
+            horizontal=True,
+            disabled=is_us,
+            help="Switch between the US rate and the selected country's rate. Rates come from the "
+                 "OECD data or from the overrides in the sidebar.",
+        )
+        if is_us:
+            tc2.info("Select a foreign target country to switch to its tax rate.")
+        use_fx_tax = tax_choice == "FX" and not is_us
+        if use_fx_tax and fx_tax_missing:
+            tc2.warning(f"No OECD rate for {country}: using the US rate. Tick "
+                        f"'Override {country} corporate tax rate' in the sidebar to enter one.")
+            use_fx_tax = False
+        t = (t_fx if use_fx_tax else t_us) / 100
+        tc2.metric("Rate applied to both currencies", f"{t * 100:.2f}%",
+                   help="United States rate" if not use_fx_tax else f"{country} rate")
 
     res = compute(beta_u, erp, d, t, rf_us / 100, rf_fx / 100, spread_us / 100, spread_fx / 100)
 
