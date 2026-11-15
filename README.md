@@ -16,11 +16,25 @@ Input	Source	What is used
 Unlevered industry betas	Damodaran, betas.xls — https://pages.stern.nyu.edu/~adamodar/pc/datasets/betas.xls	"Unlevered beta" (or, optionally, "Unlevered beta corrected for cash") from the Industry Averages sheet
 Corporate tax rates	OECD Corporate Tax Statistics 2024, ch. 2 — https://www.oecd.org/en/publications/corporate-tax-statistics-2024_9c27d6e8-en/full-report/statutory-corporate-income-tax-rates_440f9286.html	Combined statutory CIT rates for 2024. The chapter page draws them as a chart, not a table, so the app reads the Excel file behind Figure 2.1 (StatLink https://stat.link/0qkxo1)
 USD BBB spread	Damodaran, Ratings, Interest Coverage Ratios and Default Spread — https://pages.stern.nyu.edu/adamodar/New_Home_Page/datafile/ratings.html	Spread for Baa2/BBB in the table for large non-financial service firms
-10-year government bond yields	Trading Economics — https://tradingeconomics.com/bonds	Scraped from the HTML tables (no API). Each country's quote date is kept
+10-year government bond yields	Trading Economics — https://tradingeconomics.com/bonds	Scraped when the site allows it (no API); otherwise pasted in (see below). Each country's quote date is kept
 
 Expand "Data sources, dates and fetch status" in the app to see each source's URL, its data date (for example "January 2026" for Damodaran), when it was fetched, and whether the fetch worked. Bond yields are cached for 6 hours and the other sources for 24 hours. Refresh data clears the cache and fetches everything again.
 
-If a source can't be reached (Trading Economics sometimes blocks automated requests), the app shows a warning and keeps working. Enter the missing values with the manual overrides. If the OECD fetch fails, the US tax rate falls back to the 21% federal rate, labelled "fallback".
+Importing the bond yields (Trading Economics)
+
+Trading Economics doesn't put its yields table in the page HTML. The table arrives from a second request (/bonds?partial=markets), and that request is protected by an AWS WAF bot check that runs in the visitor's browser and can escalate to a CAPTCHA. Scripts, this app included, usually get an empty HTTP 202 response. The app does not try to defeat that check.
+
+When the scrape returns nothing, the app opens a "📋 Import 10-year yields from Trading Economics (paste)" panel:
+
+Open https://tradingeconomics.com/bonds in your browser.
+Select the tables with your mouse, from the Major heading down to the last country, and copy them (Ctrl/Cmd + C).
+Paste into the panel. The app reads each country, its yield and its quote date, and records "Pasted by user <time>" in the sources table.
+
+Pasted values replace fetched ones. They stay for the rest of your browser session, and Refresh data doesn't clear them. You can also type any yield by hand in the sidebar.
+
+Missing inputs
+
+The app never substitutes 0% for a missing input. If a required value (beta, either bond yield, a tax rate, a spread) is unavailable, the results are hidden and a message lists what's missing. Fields that couldn't be fetched appear in the sidebar as blank boxes marked "not fetched, enter manually". If the OECD fetch fails, the US tax rate falls back to the 21% federal rate, labelled "fallback".
 
 Features
 Selections: industry, target country (every country on the Trading Economics bonds page), beta measure.
@@ -72,7 +86,7 @@ The data is scraped, so a source changing its page layout can break that source'
 fetch_betas() — finds the "Industry Name" header row in the .xls file.
 fetch_tax_rates() — follows the Figure 2.1 StatLink and reads jurisdiction and rate rows. For each country it uses the "Combined" column if there is one; otherwise it takes the largest rate in the row. To use a newer OECD edition, update OECD_PAGE_URL and OECD_STATLINK_FIG21.
 fetch_bbb_spread() — takes the first Baa2/BBB row, which is the non-financial table.
-fetch_bond_yields() — reads rows that link to /<country>/government-bond-yield and takes their #p (yield) and #date cells.
+fetch_bond_yields() / parse_te_html() — try /bonds and /bonds?partial=markets, reading rows that link to /<country>/government-bond-yield and taking their #p (yield) and #date cells. parse_te_paste() handles text copied from the page.
 
 Country names are matched across sources by ISO-3 code (pycountry plus an alias list), so "South Korea" (Trading Economics) matches "Korea" (OECD).
 
