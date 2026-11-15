@@ -297,56 +297,117 @@ def fetch_bbb_spread() -> dict:
         return {"data": None, "meta": meta}
 
 
+def _te_quote_date(raw_date: str) -> str:
+    """Trading Economics shows 'Nov/13' (no year) or an intraday time like '10:15'."""
+    today = datetime.now()
+    dm = re.fullmatch(r"([A-Za-z]{3})/(\d{1,2})", raw_date or "")
+    if dm:
+        try:
+            dt = datetime.strptime(f"{dm.group(1)} {dm.group(2)} {today.year}", "%b %d %Y")
+            if dt > today:
+                dt = dt.replace(year=today.year - 1)
+            return dt.strftime("%Y-%m-%d")
+        except ValueError:
+            return raw_date
+    if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", raw_date or ""):
+        return f"{today:%Y-%m-%d} {raw_date} (intraday)"
+    return raw_date or "n/a"
+
+
+def parse_te_html(html: str) -> pd.DataFrame:
+    """Parse the Trading Economics bonds tables (rendered HTML)."""
+    soup = BeautifulSoup(html, "lxml")
+    rows: dict[str, dict] = {}
+    for tr in soup.select("table tr"):
+        a = tr.find("a", href=re.compile(r"/government-bond-yield$"))
+        if not a:
+            continue
+        country = a.get_text(" ", strip=True)
+        if country in rows:
+            continue
+        p_td = tr.find("td", id="p")
+        if p_td is None:
+            tds = tr.find_all("td")
+            p_td = tds[2] if len(tds) > 2 else None
+        try:
+            yld = float(p_td.get_text(strip=True).replace(",", ""))
+        except (AttributeError, ValueError):
+            continue
+        d_td = tr.find("td", id="date")
+        rows[country] = {"Country": country, "10Y yield (%)": yld,
+                         "Quote date": _te_quote_date(d_td.get_text(strip=True) if d_td else "")}
+    return _finish_bonds(list(rows.values()))
+
+
+def parse_te_paste(text: str) -> pd.DataFrame:
+    """Parse the bonds table copied from tradingeconomics.com/bonds in a browser.
+
+    Each copied row looks like:  United States  5.1450  0.0110  0.28% ... Nov/13
+    (tab- or multi-space-separated). Header rows ("Major10Y Yield Chg ...") are ignored.
+    """
+    rows: dict[str, dict] = {}
+    for line in (text or "").splitlines():
+        cells = [c.strip() for c in re.split(r"\t+|\s{2,}", line.strip()) if c.strip()]
+        if len(cells) < 2:
+            continue
+        name = cells[0]
+        if re.search(r"\d", name) or name.lower() in {"major", "europe", "america", "asia",
+                                                       "oceania", "africa", "country"}:
+            continue
+        yld = None
+        for c in cells[1:]:
+            if re.fullmatch(r"-?\d+(?:\.\d+)?", c.replace(",", "")):
+                yld = float(c.replace(",", ""))
+                break
+        if yld is None:
+            continue
+        date_cell = next((c for c in reversed(cells)
+                          if re.fullmatch(r"[A-Za-z]{3}/\d{1,2}|\d{1,2}:\d{2}(:\d{2})?", c)), "")
+        rows.setdefault(name, {"Country": name, "10Y yield (%)": yld,
+                               "Quote date": _te_quote_date(date_cell)})
+    return _finish_bonds(list(rows.values()))
+
+
+def _finish_bonds(rows: list[dict]) -> pd.DataFrame:
+    cols = ["Country", "10Y yield (%)", "Quote date", "ISO3"]
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    df = pd.DataFrame(rows).sort_values("Country").reset_index(drop=True)
+    df["ISO3"] = df["Country"].map(to_iso3)
+    return df[cols]
+
+
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def fetch_bond_yields() -> dict:
-    """Scrape 10-year government bond yields from Trading Economics (no API)."""
+    """Scrape 10-year government bond yields from Trading Economics (no API).
+
+    The page HTML contains only a "Loading..." placeholder. The tables arrive from
+    `/bonds?partial=markets`, which Trading Economics protects with an AWS WAF
+    browser check: scripts usually get an empty HTTP 202 reply. Both URLs are tried.
+    If neither returns rows, the app asks the user to paste the table instead.
+    """
     meta = {"source": BONDS_URL, "fetched": _now(), "ok": False, "date": "per-row quote date", "error": ""}
+    blocked = False
     try:
-        resp = _get(BONDS_URL)
-        soup = BeautifulSoup(resp.text, "lxml")
-        today = datetime.now()
-        rows = {}
-        for tr in soup.select("table tr"):
-            a = tr.find("a", href=re.compile(r"/government-bond-yield$"))
-            if not a:
+        for url in (BONDS_URL, f"{BONDS_URL}?partial=markets"):
+            resp = _get(url)
+            if resp.status_code == 202 or not resp.text.strip():
+                blocked = True
                 continue
-            country = a.get_text(" ", strip=True)
-            if country in rows:
-                continue
-            p_td = tr.find("td", id="p")
-            if p_td is None:
-                tds = tr.find_all("td")
-                p_td = tds[2] if len(tds) > 2 else None
-            try:
-                yld = float(p_td.get_text(strip=True).replace(",", ""))
-            except (AttributeError, ValueError):
-                continue
-            d_td = tr.find("td", id="date")
-            raw_date = d_td.get_text(strip=True) if d_td else ""
-            quote_date = raw_date
-            # Dates look like "Nov/13" (no year) or a time like "10:15"
-            dm = re.fullmatch(r"([A-Za-z]{3})/(\d{1,2})", raw_date)
-            if dm:
-                try:
-                    dt = datetime.strptime(f"{dm.group(1)} {dm.group(2)} {today.year}", "%b %d %Y")
-                    if dt > today:
-                        dt = dt.replace(year=today.year - 1)
-                    quote_date = dt.strftime("%Y-%m-%d")
-                except ValueError:
-                    pass
-            elif re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", raw_date):
-                quote_date = f"{today:%Y-%m-%d} {raw_date} (intraday)"
-            rows[country] = {"Country": country, "10Y yield (%)": yld, "Quote date": quote_date}
-        if not rows:
-            raise ValueError("No bond rows parsed (page layout changed or access blocked)")
-        df = pd.DataFrame(rows.values()).sort_values("Country").reset_index(drop=True)
-        df["ISO3"] = df["Country"].map(to_iso3)
-        meta["ok"] = True
-        return {"data": df, "meta": meta}
+            df = parse_te_html(resp.text)
+            if not df.empty:
+                meta["ok"] = True
+                return {"data": df, "meta": meta}
+            if "Loading" in resp.text:
+                blocked = True
+        raise ValueError(
+            "Trading Economics only sends the yields table after a browser bot check (AWS WAF); "
+            "automated requests receive an empty page. Paste the table into the app instead."
+            if blocked else "No bond rows parsed (page layout may have changed)"
+        )
     except Exception as exc:  # noqa: BLE001
-        meta["error"] = f"{type(exc).__name__}: {exc}"
-        return {"data": pd.DataFrame(columns=["Country", "10Y yield (%)", "Quote date", "ISO3"]),
-                "meta": meta}
+        meta["error"] = f"{type(exc).__name__}: {exc}" if not isinstance(exc, ValueError) else str(exc)
+        return {"data": _finish_bonds([]), "meta": meta}
 
 
 # --------------------------------------------------------------------------
@@ -395,22 +456,29 @@ def pct(x: float | None, nd: int = 2) -> str:
 # --------------------------------------------------------------------------
 def override_input(label: str, fetched: float | None, key: str, *, step: float = 0.01,
                    fmt: str = "%.2f", help_txt: str = "", suffix: str = "%",
-                   source_note: str = "fetched") -> tuple[float, bool]:
-    """A checkbox + number input. Returns (value, overridden)."""
+                   source_note: str = "fetched") -> tuple[float | None, bool]:
+    """A checkbox + number input. Returns (value, overridden); value is None when
+    nothing was fetched and the user has not typed a value yet."""
     has_fetch = fetched is not None and not pd.isna(fetched)
-    shown = f"{fetched:{fmt[1:]}}{suffix}" if has_fetch else "not available"
-    over = st.checkbox(
-        f"Override {label}", key=f"ov_{key}", value=not has_fetch,
-        help=help_txt or f"Fetched value: {shown}",
-    )
+    if not has_fetch:
+        # Nothing fetched: ask for the value directly. This widget has its own key, so it
+        # does not leave an Override box ticked once data becomes available.
+        val = st.number_input(
+            f"{label} ({suffix.strip() or 'value'}) — not fetched, enter manually",
+            value=None, step=step, format=fmt, key=f"man_{key}", placeholder="enter a value",
+        )
+        return (None if val is None else float(val)), True
+    shown = f"{fetched:{fmt[1:]}}{suffix}"
+    over = st.checkbox(f"Override {label}", key=f"ov_{key}", value=False,
+                       help=help_txt or f"Fetched value: {shown}")
     if over:
         val = st.number_input(
-            f"{label} ({suffix.strip() or 'value'})", value=float(fetched) if has_fetch else 0.0,
+            f"{label} ({suffix.strip() or 'value'})", value=float(fetched),
             step=step, format=fmt, key=f"in_{key}",
         )
         return float(val), True
     st.caption(f"{label}: **{shown}** ({source_note})")
-    return float(fetched) if has_fetch else 0.0, False
+    return float(fetched), False
 
 
 def build_excel(sheets: dict[str, pd.DataFrame]) -> bytes:
@@ -446,6 +514,36 @@ def main() -> None:
         taxes = fetch_tax_rates()
         bbb = fetch_bbb_spread()
         bonds = fetch_bond_yields()
+
+    # ---------------- Bond yields: paste import (Trading Economics blocks scripts) ----------------
+    bonds = {"data": bonds["data"].copy(), "meta": dict(bonds["meta"])}  # never mutate cached objects
+    with st.expander("📋 Import 10-year yields from Trading Economics (paste)",
+                     expanded=bonds["data"].empty):
+        st.markdown(
+            f"Trading Economics only sends its yields table after a browser bot check, so the app "
+            f"often can't download it. To import it yourself: open **[{BONDS_URL}]({BONDS_URL})**, "
+            "select the tables with your mouse (from the *Major* heading down to the last country), "
+            "copy them (Ctrl/Cmd + C) and paste them below. Pasted yields replace any fetched values."
+        )
+        pasted_txt = st.text_area("Paste the bonds table here", key="te_paste", height=140,
+                                  placeholder="United States\t5.1450\t0.0110\t0.28%\t…\tNov/13")
+        pasted_df = parse_te_paste(pasted_txt)
+        if pasted_txt.strip() and pasted_df.empty:
+            st.error("No rows recognised. Copy the table rows, including the country names.")
+        elif not pasted_df.empty:
+            if "te_paste_time" not in st.session_state or \
+                    st.session_state.get("te_paste_hash") != hash(pasted_txt):
+                st.session_state["te_paste_time"] = _now()
+                st.session_state["te_paste_hash"] = hash(pasted_txt)
+            st.success(f"Imported {len(pasted_df)} countries.")
+            merged = pd.concat([pasted_df, bonds["data"][~bonds["data"]["Country"]
+                                                         .isin(pasted_df["Country"])]])
+            bonds["data"] = merged.sort_values("Country").reset_index(drop=True)
+            bonds["meta"].update({
+                "ok": True, "error": "",
+                "fetched": f"Pasted by user {st.session_state['te_paste_time']}",
+                "date": "per-row quote date (pasted from Trading Economics)",
+            })
 
     sources_df = pd.DataFrame([
         {"Dataset": "Industry unlevered betas (US)", "Source": betas["meta"]["source"],
@@ -489,7 +587,12 @@ def main() -> None:
         countries = sorted(tax_df["Jurisdiction"].tolist())
     if DEFAULT_COUNTRY not in countries:
         countries = [DEFAULT_COUNTRY] + countries
-    country = sb.selectbox("Target country", countries, index=countries.index(DEFAULT_COUNTRY))
+    # Remember the choice explicitly so it survives changes to the country list (e.g. after pasting)
+    prev = st.session_state.get("country_choice", DEFAULT_COUNTRY)
+    country = sb.selectbox("Target country", countries,
+                           index=countries.index(prev) if prev in countries
+                           else countries.index(DEFAULT_COUNTRY))
+    st.session_state["country_choice"] = country
     country_iso = to_iso3(country)
 
     beta_variant = sb.radio(
@@ -556,24 +659,46 @@ def main() -> None:
         else:
             rf_fx, ov_rffx = rf_us, ov_rfus
     with sb.container(border=True):
-        auto_spread_fx = implied_fx_spread(rf_us / 100, rf_fx / 100, spread_us / 100) * 100
+        can_auto = None not in (rf_us, rf_fx, spread_us)
+        auto_spread_fx = (implied_fx_spread(rf_us / 100, rf_fx / 100, spread_us / 100) * 100
+                          if can_auto else None)
         ov_sfx = st.checkbox(
             f"Override {country} BBB spread", key=f"ov_spread_fx_{country}", value=False,
             help="When off, the foreign spread is calculated automatically by converting the "
                  "USD cost of debt with the same parity relation used for equity.",
         )
         if ov_sfx:
-            spread_fx = float(st.number_input(
-                f"{country} BBB spread (%)", value=round(auto_spread_fx, 4), step=0.01,
-                format="%.2f", key=f"in_spread_fx_{country}",
-            ))
+            v = st.number_input(
+                f"{country} BBB spread (%)",
+                value=round(auto_spread_fx, 4) if auto_spread_fx is not None else None,
+                step=0.01, format="%.2f", key=f"in_spread_fx_{country}", placeholder="enter a value",
+            )
+            spread_fx = None if v is None else float(v)
         else:
             spread_fx = auto_spread_fx
-            st.caption(f"{country} BBB spread: **{auto_spread_fx:.2f}%** (automatic)")
+            st.caption(f"{country} BBB spread: **{auto_spread_fx:.2f}%** (automatic)" if can_auto
+                       else f"{country} BBB spread: automatic — needs both bond yields and the USD spread")
+
+    # ---------------- Stop if a required input is missing (never compute with a silent 0%) ----------------
+    missing = [name for name, val in [
+        ("Unlevered beta", beta_u), ("US corporate tax rate", t_us), ("USD BBB spread", spread_us),
+        ("US 10Y government bond yield", rf_us),
+        (f"{country} 10Y government bond yield", rf_fx),
+        (f"{country} BBB spread", spread_fx),
+    ] if val is None]
+    if missing:
+        st.error(
+            "**Results can't be calculated yet.** Missing input(s): " + ", ".join(missing) + ". "
+            "For bond yields, paste the Trading Economics table in *Import 10-year yields* above, or tick "
+            "the matching **Override** box in the sidebar and type the value. Other missing inputs "
+            "need their Override box. The app no longer substitutes 0%, which previously made the "
+            "foreign-currency results identical to USD."
+        )
+        st.stop()
 
     # ---------------- Project tax-rate switch (one rate for both currencies) ----------------
     is_us = country == DEFAULT_COUNTRY
-    fx_tax_missing = (not is_us) and fetched_tax_fx is None and (not ov_tfx or t_fx == 0)
+    fx_tax_missing = (not is_us) and t_fx is None
     with st.container(border=True):
         st.markdown("**Project corporate tax rate** — one rate is applied to *both* the USD and the "
                     "foreign-currency calculation")
