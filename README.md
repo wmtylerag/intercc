@@ -31,7 +31,10 @@ Corporate tax rate (US and the selected country)
 USD BBB spread
 10-year government bond yield (US and the selected country)
 Foreign BBB spread. When the override is off, the app calculates this spread automatically (see below).
-Tax switch: use the US rate or the selected country's rate. The chosen rate applies to both currencies.
+Project tax-rate switch (panel above the results): choose the United States rate or the selected country's rate. Each option shows its current value. The rate you pick is the single project tax rate used in both the USD and the foreign-currency calculations, and the panel shows it as "Rate applied to both currencies".
+The switch is greyed out while the target country is the United States, because both options would be the same rate. Pick a foreign country to enable it.
+Your choice stays the same when you change country.
+If OECD has no rate for the selected country, the app uses the US rate and says so. Tick the override in the sidebar to enter a rate yourself.
 Side-by-side results: cost of equity, pre-tax and after-tax cost of debt, and WACC in USD and in the foreign currency, with the difference in percentage points.
 Method and assumptions panel.
 All-industry comparison: a sortable table and a bar chart of WACC in both currencies for every Damodaran industry, with the selected industry highlighted.
